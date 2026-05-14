@@ -1,0 +1,12 @@
+word = "מילה"
+color = "color"
+play_solo = "alone"
+join = "join"
+ask_for_rooms = "rooms"
+win = "win"
+start_solo_game = "accept"
+create_room = "צור"
+background_color = (26, 26, 46)
+green = (106, 170, 100)
+yellow = (201, 180, 88)
+grey = (120, 124, 126)
