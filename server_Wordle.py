@@ -19,12 +19,13 @@ import random
 __author__ = "Ben"
 
 IP = "0.0.0.0"
+
 PORT = 8080
 SIZE_HEADER_FORMAT = "00000000|"
 size_header_size = len(SIZE_HEADER_FORMAT)
 TCP_DEBUG = True
 LEN_TO_PRINT = 100
-
+game_sessions = {}
 async_msg = None
 
 
@@ -39,7 +40,8 @@ class HandelCommunication(threading.Thread):
         self.private_key = None   # per-client RSA private key
         self.aes_obj = None
         self.shared_key = None    # DH shared key flag
-
+        self.current_word = ""
+        self.game_id = None
     def run(self):
         global async_msg
         print("New Client num " + str(self.tid))
@@ -114,7 +116,6 @@ class HandelCommunication(threading.Thread):
                             self.send("EmailF")
                     except Exception:
                         self.send("EmailF")
-
                 elif data[0:14] == "ForgotPassword":
                     user_name = data.split(":")[1]
                     if self.sqlpy.IsuserExixst_byname(user_name):
@@ -321,6 +322,7 @@ class HandelCommunication(threading.Thread):
         ciphertext = data[:-12]
         nonce = data[-12:]
         try:
+            print(self.aes_obj.decrypt(nonce, ciphertext, self.associated_data).decode())
             return self.aes_obj.decrypt(nonce, ciphertext, self.associated_data).decode()
         except Exception as e:
             print(f"Decryption error: {e}")
@@ -379,36 +381,119 @@ class HandelCommunication(threading.Thread):
                 print(f"\nSent(enc {len(encode_bdata)})>>>{bdata[:LEN_TO_PRINT]}")
 
     def handle_game(self, data, user_name):
-        global async_msg
-        global word
+        global async_msg, game_sessions
         to_send = ""
         msg_type = data.split(":")[0]
-        if len(data) > 5 and data[0:5] == const.play_solo:
-            word = gen_word(int(data.split(";")[1]))
+
+        # Handle Room Invites and Initialization
+        if len(data) > 5 and data.split(";")[0] == const.play_solo:
+            self.current_word = gen_word(int(data.split(";")[1]))
             to_send = const.start_solo_game
-        color_set = ""
-        if len(data) > 4 and data[0:4] == const.word and word != "":
-            cliword = data[5:]
-            print(word)
-            if cliword == word:
-                to_send = const.win +":"+ word
+
+        elif data == const.ask_for_rooms:
+            av_user = []
+            for name in self.sqlpy.not_avilable:
+                if name != user_name:
+                    av_user.append(name)
+            to_send = str(av_user)
+
+        elif msg_type == const.INVITE_REQUEST:
+            parts = data.split(":")[1].split(";")
+            invitee = parts[0]
+            word_size = int(parts[1])
+            if invitee in async_msg.sock_by_user:
+                invite_msg = f"{const.INVITE_REQUEST}:{user_name};{word_size}"
+                async_msg.queue_message_for_user(invitee, invite_msg)
+
+        elif msg_type == const.INVITE_ACCEPT:
+            parts = data.split(":")[1].split(";")
+            inviter = parts[0]
+            word_size = int(parts[1])
+
+            # Create shared game session room
+            game_id = f"{inviter}_{user_name}_{time.time()}"
+            game_word = gen_word(word_size)
+            game_sessions[game_id] = {
+                "players": [inviter, user_name],
+                "sockets": {
+                    inviter: async_msg.sock_by_user.get(inviter),
+                    user_name: async_msg.sock_by_user.get(user_name),
+                },
+                "word": game_word,
+                "current_turn": 0
+            }
+            # Assign properties to the matching thread of the accepting player
+            self.game_id = game_id
+            self.current_word = game_word
+
+            # Notify inviter side about match info (they will bind game_id on next message)
+            start_msg = f"{const.START_MULTIPLAYER}:{inviter},{user_name};{word_size};{game_id}"
+            async_msg.queue_message_for_user(inviter, start_msg)
+            to_send = f"{const.START_MULTIPLAYER}:{inviter},{user_name};{word_size};{game_id}"
+
+        elif msg_type == const.INVITE_REJECT:
+            inviter = data.split(":")[1]
+            reject_msg = f"{const.INVITE_REJECT}:{user_name}"
+            async_msg.queue_message_for_user(inviter, reject_msg)
+            to_send = const.INVITE_REJECT
+
+        elif msg_type == const.word:
+            # e.g., "word:GUESS;game_id_string"
+            payload = data.split(":")[1]
+            if ";" in payload:
+                cliword = payload.split(";")[0]
+                client_game_id = payload.split(";")[1]
+                if not self.game_id or self.game_id != client_game_id:
+                    self.game_id = client_game_id
+                    if self.game_id in game_sessions:
+                        self.current_word = game_sessions[self.game_id]["word"]
             else:
-                for cl, l in zip(cliword, word):
-                    if cl == l:
-                        color_set += str(const.green) + ";"
-                    elif cl in word:
-                        color_set += str(const.yellow) + ";"
-                    else:
-                        color_set += str(const.grey) + ";"
-            to_send = const.color + color_set
-        if len(data) > 3 and data[:3] == "צור":  # working with hebrew in python is really hard
-            parts = data.split(";")
-            print(parts)
-            game_type = parts[1]
-            room_name = parts[0][3:]
-            self.rooms[room_name] = int(game_type)
-        if len(data) == 5 and data == const.ask_for_rooms:
-            to_send = self.rooms.keys()
+                cliword = payload
+
+            game = game_sessions.get(self.game_id) if self.game_id else None
+            target_word = game["word"] if game else self.current_word
+            print(target_word)
+            if target_word != "":
+
+                if cliword == target_word:
+                    green_colors = (str(const.green) + ";") * len(target_word)
+                    to_send = const.win + ":" + target_word
+
+                    if game:
+                        other_player = game["players"][(game["players"].index(user_name) + 1) % 2]
+
+                        async_msg.queue_message_for_user(
+                            other_player,
+                            f"{const.MULTIPLAYER_OPPONENT_GUESS}:{cliword};{green_colors}"
+                        )
+                        # Graceful end event packet invocation
+                        async_msg.queue_message_for_user(
+                            other_player, f"game_ended:{user_name}_won"
+                        )
+                        # Clean session context safely
+                        if self.game_id in game_sessions:
+                            del game_sessions[self.game_id]
+
+                else:
+                    color_set = ""
+                    for cl, l in zip(cliword, target_word):
+                        if cl == l:
+                            color_set += str(const.green) + ";"
+                        elif cl in target_word:
+                            color_set += str(const.yellow) + ";"
+                        else:
+                            color_set += str(const.grey) + ";"
+                    to_send = const.color + color_set
+
+                    if game:
+                        other_player = game["players"][(game["players"].index(user_name) + 1) % 2]
+                        # Mirror data down to the other socket instantly
+                        async_msg.queue_message_for_user(
+                            other_player,
+                            f"{const.MULTIPLAYER_OPPONENT_GUESS}:{cliword};{color_set}"
+                        )
+                        game["current_turn"] = (game["current_turn"] + 1) % 2
+
         return to_send
 
 def gen_word(word_len):
@@ -425,10 +510,8 @@ def gen_word(word_len):
 
 
 def main():
-    global word
     global async_msg
     async_msg = AsyncMessages()
-    word = ''
     shared_sqlpy = sqlpy()
 
     s = socket.socket()

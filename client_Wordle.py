@@ -84,7 +84,7 @@ class HandelCommunication(socket.socket):
         self.associated_data = b"Bentheking"
         # Start listening thread
         threading.Thread(target=self._listen_loop, daemon=True).start()
-
+        self.game_id = None
     def _listen_loop(self):
         """Continuously listen for responses in background thread"""
         while True:
@@ -283,6 +283,7 @@ class LoginPage(tk.Frame):
             if worked == "LoginS":
                 self.controller.show_frame(EmailPassword)
                 self.controller.frames[EmailPassword].start_timer_display("login")
+                self.client._current_user = user
             elif worked == "LoginF":
                 messagebox.showinfo("Login Failed", "Wrong username or password!")
             elif worked == "LoginNotAb":
@@ -578,10 +579,17 @@ class ResetPassword(tk.Frame):
 class MenuWordle(tk.Frame):
     def __init__(self, parent, controller, client):
         super().__init__(parent, bg=CLR_BG)
+        self.parent = parent
         self.client = client
         self.controller = controller
         self.button = button_thread(client=self.client)
 
+        # START LISTENING FOR INCOMING INVITES
+        self.invite_listener_thread = threading.Thread(
+            target=self._listen_for_invites,
+            daemon=True
+        )
+        self.invite_listener_thread.start()
         # 1. Title
         tkcu.CTkLabel(self, text="Wordle Game", font=FONT_TITLE,
                       text_color=CLR_HILIGHT, fg_color=CLR_BG).pack(pady=(30, 10))
@@ -620,20 +628,150 @@ class MenuWordle(tk.Frame):
         self.lbl_status = tkcu.CTkLabel(self, text="", text_color="#facc15")
         self.lbl_status.pack(pady=5)
 
+    def _listen_for_invites(self):
+        """Background thread that listens for incoming game invites and game start signals"""
+        while True:
+            try:
+                if self.client._response_queue.qsize() > 0:
+                    msg = self.client._response_queue.get(timeout=0.5)
+
+                    if isinstance(msg, str) and msg.startswith(const.INVITE_REQUEST):
+                        self._handle_incoming_invite(msg)
+
+                    # 2. Check if this is the start signal for a game WE hosted/joined
+                    elif isinstance(msg, str) and msg.startswith(const.START_MULTIPLAYER):
+
+                        parts = msg.split(":")[1].split(";")
+                        word_size = int(parts[1])
+                        players = parts[0].split(",")
+                        host_player = players[0]
+                        game_id = parts[2] if len(parts) > 2 else None
+                        self.client.game_id = game_id  # store so submit_row can send it
+
+                        self.after(0, lambda w=word_size, p=players, h=host_player: self.controller.run_game(
+                            solo=False,
+                            length=w,
+                            other_players=p,
+                            inviter=h
+                        ))
+
+                    else:
+                        # Put it back if it's unrelated data (like a login or leaderboard response)
+                        self.client._response_queue.put(msg)
+
+                time.sleep(0.5)  # Check every 500ms
+            except queue.Empty:
+                time.sleep(0.5)
+            except Exception as e:
+                time.sleep(1)
+
+    def _handle_incoming_invite(self, msg):
+            # Format: "invite_request:inviter;word_size"
+            parts = msg.split(":")[1].split(";")
+            inviter = parts[0]
+            word_size = int(parts[1])
+
+
+            # Show dialog in main thread
+            self.after(0, lambda: self._show_invite_dialog(inviter, word_size))
+
+    def _show_invite_dialog(self, inviter, word_size):
+        result = messagebox.askyesno(
+            "Game Invite",
+            f"{inviter} invited you to a {word_size}-letter Wordle game!\n\nAccept?"
+        )
+
+        if result:  # Accept
+            print(f"[ACCEPT] Accepting invite from {inviter}")
+            self.client.send(f"{const.INVITE_ACCEPT}:{inviter};{word_size}")
+        else:  # Reject
+            print(f"[REJECT] Rejecting invite from {inviter}")
+            self.client.send(f"{const.INVITE_REJECT}:{inviter}")
+
     def start_alone(self):
         word_size = self.word_len_var.get()
         print(f"Starting solo game with {word_size} letters...")
-        self.controller.run_game(solo=True,length=word_size)
+        self.controller.run_game(solo=True, length=word_size)
+
     def invite_friend(self):
         word_size = self.word_len_var.get()
-        print(f"Sending invite for a {word_size}-letter game...")
-        # self.client.send(f"Invite:{friend_name};{word_size}")
+        self.client.send(const.ask_for_rooms)
+
+        response = self.client.wait_response()
+        if response is None:
+            messagebox.showerror("Error", "Server didn't respond. Try again.")
+            return
+
+        try:
+            names_list = eval(response)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to parse users: {str(e)}")
+            return
+
+        if not names_list:
+            messagebox.showinfo("No Users", "No other users are currently available to invite.")
+            return
+
+        popup = tk.Toplevel(self.parent)
+        popup.title("Invite a Player")
+        popup.geometry("320x400")
+        popup.resizable(True, True)
+        popup.configure(bg=CLR_BG)
+
+        tk.Label(
+            popup,
+            text=f"Select a player ({word_size}-letter game):",
+            font=("Segoe UI", 12, "bold"),
+            bg=CLR_BG, fg=CLR_TEXT
+        ).pack(pady=(14, 8))
+
+        frame = tk.Frame(popup, bg=CLR_BG)
+        frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=4)
+
+        canvas = tk.Canvas(frame, bg=CLR_BG, highlightthickness=0)
+        scrollbar = tk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
+        inner = tk.Frame(canvas, bg=CLR_BG)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def send_invite(name):
+            self.client.send(f"{const.INVITE_REQUEST}:{name};{word_size}")
+            messagebox.showinfo("Invite Sent", f"Invite sent to {name}!\nWaiting for them to respond...")
+            popup.destroy()
+
+        for name in names_list:
+            row = tk.Frame(inner, bg=CLR_BG)
+            row.pack(fill=tk.X, pady=5, padx=8)
+
+            tk.Label(row, text=name, font=("Segoe UI", 11),
+                     bg=CLR_BG, fg=CLR_TEXT, anchor="w", width=18).pack(side=tk.LEFT)
+
+            tk.Button(
+                row, text="Invite",
+                font=("Segoe UI", 9, "bold"),
+                bg=CLR_HILIGHT, fg="white",
+                relief=tk.FLAT, padx=10,
+                command=lambda n=name: send_invite(n)
+            ).pack(side=tk.LEFT, padx=6)
+
+        tk.Button(
+            popup, text="Cancel",
+            font=("Segoe UI", 10),
+            bg=CLR_ACCENT, fg=CLR_TEXT,
+            relief=tk.FLAT, padx=12,
+            command=popup.destroy
+        ).pack(pady=10)
+
     def handle_logout(self):
         toDisconnect = self.button.button_Logout()
         if toDisconnect:
             self.controller.show_frame(LoginPage)
         else:
             self.lbl_status.configure(text="Server error", text_color="#facc15")
+
 
 PAGESNAMES = [LoginPage, SignUpPage, ForgotPassword, ResetPassword, MenuWordle, EmailPassword]
 
@@ -663,142 +801,231 @@ class MainApp(tk.Tk):
         frame = self.frames[page_name]
         frame.tkraise()
 
-    def run_game(self, solo,length):
+    def run_game(self, solo, length, inviter=None, other_players=None):
         self.withdraw()
         try:
-            self.client.send(f"{const.play_solo};{length}")
-            accept = self.client.wait_response()
-            if accept == const.start_solo_game:
-                self.start_pygame_loop(solo,length)
+            if solo:
+                self.client.game_id = None  # clear any previous multiplayer session
+                self.client.send(f"{const.play_solo};{length}")
+                accept = self.client.wait_response()
+                if accept == const.start_solo_game:
+                    self.start_pygame_loop(solo=True, length=length)
+                else:
+                    print("Server shutdown")
             else:
-                print("Server shoutdown")
+                # Multiplayer game
+                print(f"Starting multiplayer game with {other_players}")
+                self.start_pygame_loop(solo=False, length=length, other_players=other_players, inviter=inviter)
         finally:
-            #Once Pygame is closed, bring the Tkinter window back
             self.deiconify()
 
-    def start_pygame_loop(self,solo,length):
+    def start_pygame_loop(self, solo, length, other_players=None, inviter=None):
         game_won = False
         game_lost = False
         pygame.init()
+
         WINDOW_WIDTH = 700
         WINDOW_HEIGHT = 500
         BOX_SIZE = 60
         GAP = 10
         ROWS = 6
         COLS = length
+
         try:
             font_path = os.path.join(os.environ['WINDIR'], 'Fonts', 'arial.ttf')
-
-            if os.path.exists(font_path):
-                font = pygame.freetype.Font(font_path, 40)
-            else:
-                font = pygame.freetype.Font('david', 40)
-        except Exception as e:
-            print(f"Font error: {e}")
+            font = pygame.freetype.Font(font_path if os.path.exists(font_path) else None, 40)
+        except:
             font = pygame.freetype.Font(None, 40)
-        board = [["" for box in range(COLS)] for box in range(ROWS)]
+
+        board = [["" for _ in range(COLS)] for _ in range(ROWS)]
         colors_board = [[const.background_color for _ in range(COLS)] for _ in range(ROWS)]
+
+        # Single queue for ALL server messages in multiplayer.
+        # submit_row drains it looking for its own reply; push events stay in queue.
+        game_queue = queue.Queue()
+
+        def _bg_listener():
+            """Forward every server message into game_queue."""
+            while True:
+                try:
+                    msg = self.client._response_queue.get(timeout=0.3)
+                    game_queue.put(msg)
+                except queue.Empty:
+                    continue
+                except Exception:
+                    break
+
+        if not solo:
+            threading.Thread(target=_bg_listener, daemon=True).start()
+
         error = False
         current_row = 0
         current_col = 0
-        # Initialize Pygame inside the method
-        screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-        pygame.display.set_caption("Wordle Game")
-        clock = pygame.time.Clock()
 
+        screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        pygame.display.set_caption("Wordle - Solo" if solo else
+                                   f"Wordle - vs {other_players}")
+        clock = pygame.time.Clock()
         finish = False
+
+        # Determine whose turn it is — inviter always goes first
+        if not solo:
+            my_name = self.client._current_user
+            opponent_name = next((p for p in other_players if p != my_name), "")
+            current_player_index = 0  # inviter = index 0
+
+        winner_name = ""
+
         while not finish:
-            for event in pygame.event.get():#handels all the game inputs.
+            is_my_turn = solo or (other_players[current_player_index] == self.client._current_user)
+
+            # Process all pending server-push messages (opponent moves, game end)
+            if not solo:
+                while True:
+                    try:
+                        msg = game_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
+                    if msg.startswith(const.MULTIPLAYER_OPPONENT_GUESS + ":"):
+                        # "opponent_guess:<word>;<color1>;<color2>;..."
+                        payload = msg[len(const.MULTIPLAYER_OPPONENT_GUESS) + 1:]
+                        parts = payload.split(";")
+                        opp_word = parts[0]
+                        raw_colors = [p.strip() for p in parts[1:] if p.strip()]
+
+                        # Paint the opponent's row onto the board
+                        for c_idx, letter in enumerate(opp_word):
+                            board[current_row][c_idx] = letter
+                        for c_idx, color_str in enumerate(raw_colors):
+                            try:
+                                colors_board[current_row][c_idx] = eval(color_str)
+                            except Exception:
+                                pass
+
+                        current_row += 1
+                        current_col = 0
+
+                        # It's now my turn
+                        current_player_index = (current_player_index + 1) % 2
+
+                        if current_row >= ROWS:
+                            game_lost = True
+
+                    elif msg.startswith("game_ended:"):
+                        winner = msg.split(":")[1].replace("_won", "")
+                        winner_name = winner
+                        game_lost = True
+
+                    elif msg.startswith(const.MULTIPLAYER_OPPONENT_WON + ":"):
+                        winner_name = msg.split(":")[1]
+                        game_lost = True
+
+            for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     finish = True
+
                 if event.type == pygame.KEYDOWN:
-                    #Handle Backspace
+                    if not is_my_turn:
+                        continue
+
                     if event.key == pygame.K_BACKSPACE:
                         if current_col > 0:
                             current_col -= 1
                             board[current_row][current_col] = ""
                             error = False
-                    #Handle Enter
-                    elif event.key == pygame.K_RETURN:
-                        if  self.check_line(board, current_row, COLS) and current_col == COLS and current_row <= ROWS - 1:
-                            result = self.submit_row("".join(board[current_row]))
-                            if result == True:
-                                for i in range(COLS):
-                                    colors_board[current_row][i] = (106, 170, 100)  # Green
-                                game_won = True
-                            for i in range(COLS):
-                                colors_board[current_row][i] = result[i]
-                            current_row += 1
-                            current_col = 0
-                            error = False
-                        if  current_row == ROWS:
-                            game_lost = True
 
-                        else:
-                            error = True
-                    #Handle Hebrew Input
+                    elif event.key == pygame.K_RETURN:
+                        if self.check_line(board, current_row, COLS) and current_col == COLS:
+                            result = self.submit_row(
+                                "".join(board[current_row]),
+                                game_queue if not solo else None
+                            )
+
+                            if result is True:
+                                for i in range(COLS):
+                                    colors_board[current_row][i] = const.green
+                                current_row += 1
+                                current_col = 0
+                                game_won = True
+                                winner_name = self.client._current_user
+                            elif result is not None:
+                                for i in range(COLS):
+                                    colors_board[current_row][i] = result[i]
+                                current_row += 1
+                                current_col = 0
+                                error = False
+
+                                # Switch turn to opponent
+                                if not solo:
+                                    current_player_index = (current_player_index + 1) % len(other_players)
+
+                                if current_row >= ROWS and not game_won:
+                                    if solo:
+                                        game_lost = True
+
                     else:
                         char = event.unicode
-                        # Check if character is a Hebrew letter(Unicode range)
                         if '\u05d0' <= char <= '\u05ea':
                             if current_col < COLS:
                                 board[current_row][current_col] = char
                                 current_col += 1
                                 error = False
+
             screen.fill(const.background_color)
 
-            # Calculate grid dimensions
-            grid_width = (COLS * BOX_SIZE) + ((COLS - 1) * GAP)
-            grid_height = (ROWS * BOX_SIZE) + ((ROWS - 1) * GAP)
-            start_x = (WINDOW_WIDTH - grid_width) // 2
-            start_y = (WINDOW_HEIGHT - grid_height) // 2
+            grid_w = COLS * BOX_SIZE + (COLS - 1) * GAP
+            grid_h = ROWS * BOX_SIZE + (ROWS - 1) * GAP
+            start_x = (WINDOW_WIDTH - grid_w) // 2
+            start_y = (WINDOW_HEIGHT - grid_h) // 2
 
             for r in range(ROWS):
                 for c in range(COLS):
                     x = start_x + (COLS - 1 - c) * (BOX_SIZE + GAP)
                     y = start_y + r * (BOX_SIZE + GAP)
-
                     rect = pygame.Rect(x, y, BOX_SIZE, BOX_SIZE)
-
-
                     pygame.draw.rect(screen, colors_board[r][c], rect)
+                    if board[r][c]:
+                        ts, tr = font.render(board[r][c], (255, 255, 255))
+                        tr.center = rect.center
+                        screen.blit(ts, tr)
+                    border = (255, 255, 255) if r == current_row and c == current_col and is_my_turn \
+                        else (70, 70, 70)
+                    pygame.draw.rect(screen, border, rect, 2)
 
-                    # Draw Letter
-                    if board[r][c] != "":
-                        text_surf, text_rect = font.render(board[r][c], (255, 255, 255))
-                        text_rect.center = rect.center
-                        screen.blit(text_surf, text_rect)
-                    if r == current_row and c == current_col:
-                        border_color = (255, 255, 255)
-                    else:
-                        border_color = (70, 70, 70)
-
-                    pygame.draw.rect(screen, border_color, rect, 2)
+            # Turn indicator
+            if not solo:
+                turn_owner = other_players[current_player_index]
+                turn_text = "Your turn" if is_my_turn else f"{turn_owner}'s turn"
+                color = (100, 220, 100) if is_my_turn else (220, 100, 100)
+                ts, _ = font.render(turn_text, color, size=22)
+                screen.blit(ts, (WINDOW_WIDTH // 2 - ts.get_width() // 2, 10))
 
             if error:
-                err_surf, err_rect = font.render("המילה לא קיימת או שלא מילאת את השורה!"[::-1], (255, 0, 0), size=20)
+                es, _ = font.render("המילה לא קיימת!"[::-1], (255, 0, 0), size=20)
+                screen.blit(es, ((WINDOW_WIDTH - es.get_width()) // 2, start_y + grid_h + 30))
 
-                # Center the error message below the grid
-                err_x = (WINDOW_WIDTH - err_surf.get_width()) // 2
-                err_y = start_y + grid_height + 30
-
-                screen.blit(err_surf, (err_x, err_y))
             if game_won:
-                win_surf, win_rect = font.render("ניצחון!", (0, 255, 0), size=50)
-                win_rect.center = (WINDOW_WIDTH // 2, 50)  # Top of screen
-                screen.blit(win_surf, win_rect)
+                ws, _ = font.render(("ניצחון!" if solo else f"ניצחת!")[::-1], (0, 255, 0), size=50)
+                screen.blit(ws, (WINDOW_WIDTH // 2 - ws.get_width() // 2, 50))
                 pygame.display.flip()
                 time.sleep(3)
                 finish = True
+
             elif game_lost:
-                lost_surf, lost_rect = font.render("הפסד", (255, 0, 0), size=50)
-                lost_rect.center = (WINDOW_WIDTH // 2, 50)
-                screen.blit(lost_surf,lost_rect)
+                if winner_name and winner_name != self.client._current_user:
+                    lost_text = f"{winner_name} ניצח!"
+                else:
+                    lost_text = "הפסדת!"
+                ls, _ = font.render(lost_text, (255, 0, 0), size=50)
+                screen.blit(ls, (WINDOW_WIDTH // 2 - ls.get_width() // 2, 50))
                 pygame.display.flip()
                 time.sleep(3)
                 finish = True
+
             else:
                 pygame.display.flip()
+
             clock.tick(60)
 
         pygame.quit()
@@ -828,13 +1055,42 @@ class MainApp(tk.Tk):
             print(f"Error loading data: {e}")
             return None
 
-    def submit_row(self,word):
-        self.client.send(const.word +":"+ word)
-        color_str = self.client.wait_response()
+    def submit_row(self, word, game_queue=None):
+        game_id = self.client.game_id
+        payload = f"{word};{game_id}" if game_id else word
+        self.client.send(const.word + ":" + payload)
+
+        if game_queue is None:
+            # Solo: read directly from the response queue
+            color_str = self.client.wait_response()
+        else:
+            # Multiplayer: drain game_queue until we get OUR reply (color/win).
+            # Any push-event messages (opponent guess, game_ended) are put back
+            # so the main loop can process them on the next frame.
+            push_prefixes = (
+                const.MULTIPLAYER_OPPONENT_GUESS,
+                "game_ended",
+                const.MULTIPLAYER_OPPONENT_WON,
+            )
+            color_str = None
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                try:
+                    msg = game_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if msg and any(msg.startswith(p) for p in push_prefixes):
+                    game_queue.put(msg)   # put back for the main loop
+                else:
+                    color_str = msg
+                    break
+
+        if not color_str:
+            return None
         if color_str.startswith(const.win):
             return True
-        if color_str[:5] == "color":
-            color_strings = [c for c in color_str[5:].split(";") if c]
+        if color_str.startswith(const.color):
+            color_strings = [c for c in color_str[len(const.color):].split(";") if c]
             color_list = [eval(c) for c in color_strings]
             return color_list
 class button_thread(threading.Thread):
