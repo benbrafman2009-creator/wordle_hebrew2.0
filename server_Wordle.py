@@ -1,8 +1,7 @@
 import sys
 import threading
 from AsyncMessages import AsyncMessages
-from Desktop.Lib.dbm.sqlite3 import error
-from Desktop.cyber.encode.Email import email_send
+from Email import email_send
 from pickle import loads
 from pickle import dumps
 import socket
@@ -19,7 +18,7 @@ import const
 import random
 __author__ = "Ben"
 
-IP = "127.0.0.1"
+IP = "0.0.0.0"
 PORT = 8080
 SIZE_HEADER_FORMAT = "00000000|"
 size_header_size = len(SIZE_HEADER_FORMAT)

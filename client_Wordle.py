@@ -3,7 +3,6 @@ import tkinter as tk
 import customtkinter as tkcu
 import socket
 import threading
-from PycharmProjects.code.ben import result
 from tkinter import messagebox
 import time
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -18,7 +17,7 @@ import queue
 import const
 
 __author__ = "Ben"
-IP = "127.0.0.1"
+IP = "192.168.1.127"
 PORT = 8080
 SIZE_HEADER_FORMAT = "00000000|"
 size_header_size = len(SIZE_HEADER_FORMAT)
@@ -694,7 +693,7 @@ class MainApp(tk.Tk):
                 font = pygame.freetype.Font(font_path, 40)
             else:
                 font = pygame.freetype.Font('david', 40)
-        except:
+        except Exception as e:
             print(f"Font error: {e}")
             font = pygame.freetype.Font(None, 40)
         board = [["" for box in range(COLS)] for box in range(ROWS)]
