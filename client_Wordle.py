@@ -888,7 +888,7 @@ class MainApp(tk.Tk):
                         break
 
                     if msg.startswith(const.MULTIPLAYER_OPPONENT_GUESS + ":"):
-                        # "opponent_guess:<word>;<color1>;<color2>;..."
+                        # "opponent_guess:<word>;<color1>;<color2>;"
                         payload = msg[len(const.MULTIPLAYER_OPPONENT_GUESS) + 1:]
                         parts = payload.split(";")
                         opp_word = parts[0]

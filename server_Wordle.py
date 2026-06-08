@@ -466,7 +466,6 @@ class HandelCommunication(threading.Thread):
                             other_player,
                             f"{const.MULTIPLAYER_OPPONENT_GUESS}:{cliword};{green_colors}"
                         )
-                        # Graceful end event packet invocation
                         async_msg.queue_message_for_user(
                             other_player, f"game_ended:{user_name}_won"
                         )
