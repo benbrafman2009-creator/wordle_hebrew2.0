@@ -17,7 +17,7 @@ import queue
 import const
 
 __author__ = "Ben"
-IP = "192.168.1.127"
+IP = "192.168.1.145"
 PORT = 8080
 SIZE_HEADER_FORMAT = "00000000|"
 size_header_size = len(SIZE_HEADER_FORMAT)
@@ -858,7 +858,16 @@ class MainApp(tk.Tk):
         if not solo:
             threading.Thread(target=_bg_listener, daemon=True).start()
 
-        error = False
+        error_msg = ""
+        error_timer = 0
+        ERROR_DURATION = 2000  # ms
+
+        FLIP_DURATION = 300    # ms for one tile to flip
+        FLIP_DELAY = 100       # ms between each tile starting
+        flip_result = []
+        flip_start_time = 0
+        animating = False
+
         current_row = 0
         current_col = 0
 
@@ -933,36 +942,36 @@ class MainApp(tk.Tk):
                         if current_col > 0:
                             current_col -= 1
                             board[current_row][current_col] = ""
-                            error = False
+                            error_msg = ""
 
-                    elif event.key == pygame.K_RETURN:
-                        if self.check_line(board, current_row, COLS) and current_col == COLS:
+                    elif event.key == pygame.K_RETURN and not animating:
+                        if current_col < COLS:
+                            error_msg = "!מלא את כל התיבות קודם"
+                            error_timer = pygame.time.get_ticks()
+                        elif not self.check_line(board, current_row, COLS):
+                            error_msg = "!המילה לא קיימת"
+                            error_timer = pygame.time.get_ticks()
+                        else:
+                            error_msg = ""
                             result = self.submit_row(
                                 "".join(board[current_row]),
                                 game_queue if not solo else None
                             )
 
                             if result is True:
-                                for i in range(COLS):
-                                    colors_board[current_row][i] = const.green
-                                current_row += 1
-                                current_col = 0
+                                flip_result = [const.green] * COLS
                                 game_won = True
                                 winner_name = self.client._current_user
                             elif result is not None:
-                                for i in range(COLS):
-                                    colors_board[current_row][i] = result[i]
-                                current_row += 1
-                                current_col = 0
-                                error = False
-
-                                # Switch turn to opponent
+                                flip_result = list(result)
                                 if not solo:
                                     current_player_index = (current_player_index + 1) % len(other_players)
 
-                                if current_row >= ROWS and not game_won:
-                                    if solo:
-                                        game_lost = True
+                            if result is not None:
+                                flip_start_time = pygame.time.get_ticks()
+                                animating = True
+                                current_row += 1
+                                current_col = 0
 
                     else:
                         char = event.unicode
@@ -970,7 +979,22 @@ class MainApp(tk.Tk):
                             if current_col < COLS:
                                 board[current_row][current_col] = char
                                 current_col += 1
-                                error = False
+                                error_msg = ""
+
+            now = pygame.time.get_ticks()
+
+            # Advance flip animation
+            if animating:
+                last_tile_done = flip_start_time + (COLS - 1) * FLIP_DELAY + FLIP_DURATION
+                if now >= last_tile_done:
+                    animating = False
+                    if current_row >= ROWS and not game_won:
+                        if solo:
+                            game_lost = True
+
+            # Clear error after timeout
+            if error_msg and now - error_timer > ERROR_DURATION:
+                error_msg = ""
 
             screen.fill(const.background_color)
 
@@ -979,19 +1003,49 @@ class MainApp(tk.Tk):
             start_x = (WINDOW_WIDTH - grid_w) // 2
             start_y = (WINDOW_HEIGHT - grid_h) // 2
 
+            anim_row = current_row - 1  # row currently animating
+
             for r in range(ROWS):
                 for c in range(COLS):
                     x = start_x + (COLS - 1 - c) * (BOX_SIZE + GAP)
                     y = start_y + r * (BOX_SIZE + GAP)
-                    rect = pygame.Rect(x, y, BOX_SIZE, BOX_SIZE)
-                    pygame.draw.rect(screen, colors_board[r][c], rect)
-                    if board[r][c]:
-                        ts, tr = font.render(board[r][c], (255, 255, 255))
-                        tr.center = rect.center
-                        screen.blit(ts, tr)
-                    border = (255, 255, 255) if r == current_row and c == current_col and is_my_turn \
-                        else (70, 70, 70)
-                    pygame.draw.rect(screen, border, rect, 2)
+                    cx = x + BOX_SIZE // 2
+                    cy = y + BOX_SIZE // 2
+
+                    if animating and r == anim_row and c < len(flip_result):
+                        tile_start = flip_start_time + c * FLIP_DELAY
+                        elapsed = now - tile_start
+                        half = FLIP_DURATION / 2
+                        if elapsed < 0:
+                            scale, color = 1.0, const.background_color
+                        elif elapsed < half:
+                            scale = 1.0 - elapsed / half
+                            color = const.background_color
+                        else:
+                            scale = (elapsed - half) / half
+                            color = flip_result[c]
+                        scale = max(0.02, min(scale, 1.0))
+                        draw_h = int(BOX_SIZE * scale)
+                        rect = pygame.Rect(x, cy - draw_h // 2, BOX_SIZE, draw_h)
+                        pygame.draw.rect(screen, color, rect)
+                        if board[r][c] and draw_h > 10:
+                            ts, tr = font.render(board[r][c], (255, 255, 255))
+                            tr.center = (cx, cy)
+                            screen.blit(ts, tr)
+                        pygame.draw.rect(screen, (200, 200, 200), rect, 2)
+                        # Lock in color once tile finishes
+                        if now >= flip_start_time + c * FLIP_DELAY + FLIP_DURATION:
+                            colors_board[r][c] = flip_result[c]
+                    else:
+                        rect = pygame.Rect(x, y, BOX_SIZE, BOX_SIZE)
+                        pygame.draw.rect(screen, colors_board[r][c], rect)
+                        if board[r][c]:
+                            ts, tr = font.render(board[r][c], (255, 255, 255))
+                            tr.center = rect.center
+                            screen.blit(ts, tr)
+                        border = (255, 255, 255) if r == current_row and c == current_col and is_my_turn \
+                            else (70, 70, 70)
+                        pygame.draw.rect(screen, border, rect, 2)
 
             # Turn indicator
             if not solo:
@@ -1001,18 +1055,18 @@ class MainApp(tk.Tk):
                 ts, _ = font.render(turn_text, color, size=22)
                 screen.blit(ts, (WINDOW_WIDTH // 2 - ts.get_width() // 2, 10))
 
-            if error:
-                es, _ = font.render("המילה לא קיימת!"[::-1], (255, 0, 0), size=20)
-                screen.blit(es, ((WINDOW_WIDTH - es.get_width()) // 2, start_y + grid_h + 30))
+            if error_msg:
+                es, _ = font.render(error_msg[::-1], (255, 80, 80), size=20)
+                screen.blit(es, ((WINDOW_WIDTH - es.get_width()) // 2, start_y + grid_h + 18))
 
-            if game_won:
+            if game_won and not animating:
                 ws, _ = font.render(("ניצחון!" if solo else f"ניצחת!")[::-1], (0, 255, 0), size=50)
                 screen.blit(ws, (WINDOW_WIDTH // 2 - ws.get_width() // 2, 50))
                 pygame.display.flip()
                 time.sleep(3)
                 finish = True
 
-            elif game_lost:
+            elif game_lost and not animating:
                 if winner_name and winner_name != self.client._current_user:
                     lost_text = f"{winner_name} ניצח!"
                 else:
@@ -1108,9 +1162,9 @@ class button_thread(threading.Thread):
         return self.client.wait_response()
 
     def button_Logout(self):
-        self.client.send("Logout:")
+        self.client.send(const.logout + ":")
         resp = self.client.wait_response()
-        return resp == "LogoutS"
+        return resp == const.logot_success
 
     def email_password_check(self, password):
         self.client.send("Email:" + password)

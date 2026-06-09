@@ -8,6 +8,8 @@ start_solo_game = "start_solo"
 word = "word"
 win = "win"
 color = "color"
+logout = "Logout"
+logot_success = "LogoutS"
 #multiplayer
 ask_for_rooms = "ask_rooms"
 INVITE_REQUEST = "invite_request"

@@ -149,7 +149,7 @@ class HandelCommunication(threading.Thread):
                     if to_send:
                         self.send(to_send)
 
-                    if data.split(":")[0] == "Logout":
+                    if data.split(":")[0] == const.logout:
                         if user_name in async_msg.sock_by_user:
                             del async_msg.sock_by_user[user_name]
                         if user_name in self.sqlpy.not_avilable:
@@ -436,7 +436,8 @@ class HandelCommunication(threading.Thread):
             reject_msg = f"{const.INVITE_REJECT}:{user_name}"
             async_msg.queue_message_for_user(inviter, reject_msg)
             to_send = const.INVITE_REJECT
-
+        elif msg_type == const.logout:
+            to_send = const.logot_success
         elif msg_type == const.word:
             # e.g., "word:GUESS;game_id_string"
             payload = data.split(":")[1]
